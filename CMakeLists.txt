@@ -37,6 +37,7 @@ FetchContent_MakeAvailable(sentencepiece)
 # Include paths
 # ---------------------------------------------------------------------------
 include_directories(${CMAKE_SOURCE_DIR}/include)
+include_directories(${sentencepiece_SOURCE_DIR}/src)
 
 # ---------------------------------------------------------------------------
 # Main executable
