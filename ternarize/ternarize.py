@@ -182,7 +182,6 @@ def convert(
     config = model.config
     vocab_size = config.vocab_size
     hidden_dim = config.hidden_size
-    intermediate_dim = config.intermediate_size
     n_layers = config.num_hidden_layers
     n_heads = config.num_attention_heads
     n_kv_heads = getattr(config, "num_key_value_heads", n_heads)
@@ -190,6 +189,15 @@ def convert(
     rope_theta = float(getattr(config, "rope_theta", 10000.0))
     rms_norm_eps = float(getattr(config, "rms_norm_eps", 1e-5))
     head_dim = hidden_dim // n_heads
+
+    # Get intermediate_dim from actual weight shape (configs can lie!)
+    gate_key = "model.layers.0.mlp.gate_proj.weight"
+    intermediate_dim_config = config.intermediate_size
+    intermediate_dim = state[gate_key].shape[0]  # actual out_features
+    if intermediate_dim != intermediate_dim_config:
+        print(f"    [!] Config says intermediate_size={intermediate_dim_config}, "
+              f"but actual gate_proj shape is {state[gate_key].shape}")
+        print(f"    [!] Using actual intermediate_dim={intermediate_dim}")
 
     print(f"    vocab_size       = {vocab_size}")
     print(f"    hidden_dim       = {hidden_dim}")
