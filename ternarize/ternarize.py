@@ -223,7 +223,7 @@ def convert(
 
         # ── 2. Embedding ──
         embed_key = "model.embed_tokens.weight"
-        embed_w = state[embed_key].to(torch.float16).numpy()
+        embed_w = state[embed_key].to(torch.float16).cpu().numpy()
         print(f"[*] Writing embedding: {embed_w.shape}")
         total_bytes += _write_raw(fout, embed_w)
         original_params += embed_w.size
@@ -252,7 +252,7 @@ def convert(
                 layer_nonzero += nz
                 layer_total += ternary.numel()
 
-                # Pack
+                # Pack (vectorized, GPU-accelerated)
                 ternary_2d = ternary.reshape(w_padded.shape[0], w_padded.shape[1])
                 nonzero_masks, sign_masks = pack_ternary_to_bitmasks(ternary_2d)
 
@@ -261,15 +261,15 @@ def convert(
                 total_bytes += _write_raw(fout, sign_masks)
 
                 # Write scales (float16)
-                scales_np = scales.numpy()
+                scales_np = scales.cpu().numpy()
                 total_bytes += _write_raw(fout, scales_np)
 
             # Norm weights (fp16)
             attn_norm_key = prefix + "input_layernorm.weight"
             ffn_norm_key = prefix + "post_attention_layernorm.weight"
 
-            attn_norm = state[attn_norm_key].to(torch.float16).numpy()
-            ffn_norm = state[ffn_norm_key].to(torch.float16).numpy()
+            attn_norm = state[attn_norm_key].to(torch.float16).cpu().numpy()
+            ffn_norm = state[ffn_norm_key].to(torch.float16).cpu().numpy()
             total_bytes += _write_raw(fout, attn_norm)
             total_bytes += _write_raw(fout, ffn_norm)
             original_params += attn_norm.size + ffn_norm.size
@@ -278,7 +278,7 @@ def convert(
             layer_sparsities.append(sparsity)
 
         # ── 4. Final norm ──
-        final_norm = state["model.norm.weight"].to(torch.float16).numpy()
+        final_norm = state["model.norm.weight"].to(torch.float16).cpu().numpy()
         total_bytes += _write_raw(fout, final_norm)
         original_params += final_norm.size
 
@@ -301,11 +301,11 @@ def convert(
             nonzero_masks, sign_masks = pack_ternary_to_bitmasks(ternary_2d)
             total_bytes += _write_raw(fout, nonzero_masks)
             total_bytes += _write_raw(fout, sign_masks)
-            total_bytes += _write_raw(fout, scales.numpy())
+            total_bytes += _write_raw(fout, scales.cpu().numpy())
             nz = (ternary != 0).sum().item()
             print(f"    lm_head sparsity: {1.0 - nz / ternary.numel():.1%}")
         else:
-            lm_head = lm_head_w.to(torch.float16).numpy()
+            lm_head = lm_head_w.to(torch.float16).cpu().numpy()
             print(f"[*] Writing lm_head (fp16): {lm_head.shape}")
             total_bytes += _write_raw(fout, lm_head)
         original_params += lm_head_w.numel()

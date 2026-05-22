@@ -7,6 +7,8 @@ Encoding (2 bits per weight):
 
 Groups of 32 consecutive values along the last dimension are packed into
 a single pair of uint32 words (bit 0 = first element, bit 31 = 32nd).
+
+All operations are fully vectorized (PyTorch GPU or CPU) — no Python loops.
 """
 
 from typing import Tuple
@@ -100,13 +102,27 @@ def ternarize_tensor(
 
 
 # ──────────────────────────────────────────────────────────────────────
-# Bitmask packing
+# Bitmask packing  — fully vectorized, GPU-accelerated
 # ──────────────────────────────────────────────────────────────────────
+
+# Precomputed bit shifts: [1, 2, 4, 8, ..., 2^31]  (as int32)
+_BIT_SHIFTS: torch.Tensor | None = None
+
+
+def _get_bit_shifts(device: torch.device) -> torch.Tensor:
+    """Return a (32,) tensor of powers of 2 on the given device, cached."""
+    global _BIT_SHIFTS
+    if _BIT_SHIFTS is None or _BIT_SHIFTS.device != device:
+        _BIT_SHIFTS = (1 << torch.arange(32, device=device, dtype=torch.int32))
+    return _BIT_SHIFTS
+
 
 def pack_ternary_to_bitmasks(
     ternary: torch.Tensor,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Pack a 2-D int8 ternary tensor into dual uint32 bitmasks.
+
+    Fully vectorized — no Python loops.  Works on CPU or GPU tensors.
 
     Parameters
     ----------
@@ -127,24 +143,27 @@ def pack_ternary_to_bitmasks(
         f"in_features ({in_features}) must be divisible by 32"
     )
 
+    device = ternary.device
     n_words = in_features // 32
-    t = ternary.numpy().astype(np.int8)                       # ensure numpy
 
-    nonzero_masks = np.zeros((out_features, n_words), dtype=np.uint32)
-    sign_masks = np.zeros((out_features, n_words), dtype=np.uint32)
+    # Reshape to (out_features, n_words, 32) — each group of 32 becomes a row
+    t = ternary.reshape(out_features, n_words, 32)
 
-    for row in range(out_features):
-        for col in range(n_words):
-            nz_word: np.uint32 = np.uint32(0)
-            s_word: np.uint32 = np.uint32(0)
-            base = col * 32
-            for bit in range(32):
-                val = t[row, base + bit]
-                if val != 0:
-                    nz_word |= np.uint32(1 << bit)
-                if val > 0:
-                    s_word |= np.uint32(1 << bit)
-            nonzero_masks[row, col] = nz_word
-            sign_masks[row, col] = s_word
+    # Boolean masks
+    is_nonzero = (t != 0)       # (out_features, n_words, 32)
+    is_positive = (t > 0)       # (out_features, n_words, 32)
+
+    # Bit shifts: [1, 2, 4, ..., 2^31]
+    shifts = _get_bit_shifts(device)   # (32,)
+
+    # Pack: for each group of 32, bitwise OR the shifted bits
+    # is_nonzero * shifts broadcasts to (out_features, n_words, 32)
+    # then sum along last dim gives the packed uint32 value
+    nonzero_packed = (is_nonzero.int() * shifts).sum(dim=2)   # (out_features, n_words)
+    sign_packed    = (is_positive.int() * shifts).sum(dim=2)  # (out_features, n_words)
+
+    # Convert to numpy uint32
+    nonzero_masks = nonzero_packed.cpu().numpy().astype(np.uint32)
+    sign_masks    = sign_packed.cpu().numpy().astype(np.uint32)
 
     return nonzero_masks, sign_masks
