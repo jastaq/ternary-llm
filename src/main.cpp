@@ -18,6 +18,7 @@
 struct Args {
     std::string model_path;
     std::string prompt       = "Hello";
+    std::string token_ids_str;              // comma-separated token IDs (bypass tokenizer)
     int         max_tokens   = 256;
     int         max_seq_len  = 4096;
     float       temperature  = 0.7f;
@@ -38,6 +39,7 @@ static void print_usage(const char* prog) {
         "Options:\n"
         "  --model <path>        Path to .tllm model file (required)\n"
         "  --prompt <text>       Input prompt (default: \"Hello\")\n"
+        "  --token-ids <ids>     Comma-separated token IDs (bypass tokenizer)\n"
         "  --max-tokens <n>      Maximum tokens to generate (default: 256)\n"
         "  --max-seq-len <n>     Maximum sequence length / KV cache size (default: 4096)\n"
         "  --temperature <f>     Sampling temperature (default: 0.7)\n"
@@ -57,6 +59,7 @@ static Args parse_args(int argc, char** argv) {
         std::string a = argv[i];
         if (a == "--model"       && i+1 < argc) args.model_path  = argv[++i];
         else if (a == "--prompt"      && i+1 < argc) args.prompt      = argv[++i];
+        else if (a == "--token-ids"   && i+1 < argc) args.token_ids_str = argv[++i];
         else if (a == "--max-tokens"  && i+1 < argc) args.max_tokens  = std::atoi(argv[++i]);
         else if (a == "--max-seq-len" && i+1 < argc) args.max_seq_len = std::atoi(argv[++i]);
         else if (a == "--temperature" && i+1 < argc) args.temperature = std::atof(argv[++i]);
@@ -245,19 +248,20 @@ int main(int argc, char** argv) {
         model.config.max_seq_len = args.max_seq_len;
     }
 
-    // Initialise tokenizer
+    // Initialise tokenizer (optional — may fail for non-SentencePiece models)
     Tokenizer tokenizer;
+    bool has_tokenizer = false;
     if (!model.tokenizer_data.empty()) {
-        if (!tokenizer.load_from_memory(model.tokenizer_data.data(),
-                                         model.tokenizer_data.size())) {
-            fprintf(stderr, "Error: Failed to load embedded tokenizer\n");
-            return 1;
+        has_tokenizer = tokenizer.load_from_memory(model.tokenizer_data.data(),
+                                                    model.tokenizer_data.size());
+        if (has_tokenizer) {
+            fprintf(stderr, "[Tokenizer] Loaded from embedded data  (vocab: %d)\n",
+                    tokenizer.vocab_size());
+        } else {
+            fprintf(stderr, "[Tokenizer] Embedded data not SentencePiece, using raw mode\n");
         }
-        fprintf(stderr, "[Tokenizer] Loaded from embedded data  (vocab: %d)\n",
-                tokenizer.vocab_size());
     } else {
-        fprintf(stderr, "Error: No tokenizer data in model file\n");
-        return 1;
+        fprintf(stderr, "[Tokenizer] No embedded tokenizer, using raw mode\n");
     }
 
     // Build transformer
@@ -274,7 +278,87 @@ int main(int argc, char** argv) {
 
     fprintf(stderr, "\n");
 
-    if (args.interactive) {
+    // --- Raw token ID mode (for non-SentencePiece models like Qwen) ---
+    if (!args.token_ids_str.empty() || !has_tokenizer) {
+        // Parse token IDs
+        std::vector<int> prompt_ids;
+        if (!args.token_ids_str.empty()) {
+            // Parse comma-separated IDs
+            std::string s = args.token_ids_str;
+            size_t pos = 0;
+            while ((pos = s.find(',')) != std::string::npos) {
+                prompt_ids.push_back(std::atoi(s.substr(0, pos).c_str()));
+                s = s.substr(pos + 1);
+            }
+            if (!s.empty()) prompt_ids.push_back(std::atoi(s.c_str()));
+        } else {
+            // No tokenizer and no token IDs — use a default BOS token
+            prompt_ids.push_back(1);  // common BOS
+        }
+
+        int n_prompt = static_cast<int>(prompt_ids.size());
+        fprintf(stderr, "[Generate] Raw token IDs: %d tokens\n", n_prompt);
+
+        // Upload to GPU
+        int* tokens_gpu = nullptr;
+        cudaMalloc(&tokens_gpu, n_prompt * sizeof(int));
+        cudaMemcpy(tokens_gpu, prompt_ids.data(), n_prompt * sizeof(int),
+                   cudaMemcpyHostToDevice);
+
+        // Prefill
+        using Clock = std::chrono::high_resolution_clock;
+        auto t0 = Clock::now();
+        half* logits = transformer.forward(tokens_gpu, n_prompt, 0);
+        cudaDeviceSynchronize();
+        auto t1 = Clock::now();
+        double prefill_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+
+        // Decode loop
+        int* one_token_gpu = nullptr;
+        cudaMalloc(&one_token_gpu, sizeof(int));
+
+        int pos = n_prompt;
+        int generated = 0;
+        auto t2 = Clock::now();
+
+        int next_token = sampler.sample(logits);
+        printf("%d", next_token);
+        generated++;
+
+        for (int i = 1; i < args.max_tokens; ++i) {
+            cudaMemcpy(one_token_gpu, &next_token, sizeof(int), cudaMemcpyHostToDevice);
+            logits = transformer.forward(one_token_gpu, 1, pos);
+            cudaDeviceSynchronize();
+
+            next_token = sampler.sample(logits);
+            sampler.add_to_history(next_token);
+            printf(",%d", next_token);
+            fflush(stdout);
+            pos++;
+            generated++;
+        }
+        auto t3 = Clock::now();
+        double decode_ms = std::chrono::duration<double, std::milli>(t3 - t2).count();
+        printf("\n");
+
+        if (args.benchmark) {
+            double prefill_tok_s = n_prompt / (prefill_ms / 1000.0);
+            double decode_tok_s = generated > 0 ? generated / (decode_ms / 1000.0) : 0;
+            fprintf(stderr, "\n--- Benchmark ---\n");
+            fprintf(stderr, "Prefill:  %d tokens in %.1f ms  (%.1f tokens/s)\n",
+                    n_prompt, prefill_ms, prefill_tok_s);
+            fprintf(stderr, "Decode:   %d tokens in %.1f ms  (%.1f tokens/s)\n",
+                    generated, decode_ms, decode_tok_s);
+            size_t free_mem = 0, total_mem = 0;
+            cudaMemGetInfo(&free_mem, &total_mem);
+            fprintf(stderr, "GPU VRAM: %.0f MB used / %.0f MB total\n",
+                    (total_mem - free_mem) / 1e6, total_mem / 1e6);
+        }
+        cudaFree(tokens_gpu);
+        cudaFree(one_token_gpu);
+    }
+    // --- Tokenizer mode ---
+    else if (args.interactive) {
         interactive_loop(transformer, tokenizer, sampler,
                          args.max_tokens, args.benchmark);
     } else {
