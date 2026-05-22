@@ -19,6 +19,7 @@ struct Args {
     std::string model_path;
     std::string prompt       = "Hello";
     int         max_tokens   = 256;
+    int         max_seq_len  = 4096;
     float       temperature  = 0.7f;
     float       top_p        = 0.9f;
     int         top_k        = 40;
@@ -38,6 +39,7 @@ static void print_usage(const char* prog) {
         "  --model <path>        Path to .tllm model file (required)\n"
         "  --prompt <text>       Input prompt (default: \"Hello\")\n"
         "  --max-tokens <n>      Maximum tokens to generate (default: 256)\n"
+        "  --max-seq-len <n>     Maximum sequence length / KV cache size (default: 4096)\n"
         "  --temperature <f>     Sampling temperature (default: 0.7)\n"
         "  --top-p <f>           Nucleus sampling threshold (default: 0.9)\n"
         "  --top-k <n>           Top-K sampling (default: 40)\n"
@@ -56,6 +58,7 @@ static Args parse_args(int argc, char** argv) {
         if (a == "--model"       && i+1 < argc) args.model_path  = argv[++i];
         else if (a == "--prompt"      && i+1 < argc) args.prompt      = argv[++i];
         else if (a == "--max-tokens"  && i+1 < argc) args.max_tokens  = std::atoi(argv[++i]);
+        else if (a == "--max-seq-len" && i+1 < argc) args.max_seq_len = std::atoi(argv[++i]);
         else if (a == "--temperature" && i+1 < argc) args.temperature = std::atof(argv[++i]);
         else if (a == "--top-p"       && i+1 < argc) args.top_p       = std::atof(argv[++i]);
         else if (a == "--top-k"       && i+1 < argc) args.top_k       = std::atoi(argv[++i]);
@@ -231,6 +234,16 @@ int main(int argc, char** argv) {
     // Load model
     fprintf(stderr, "\n[Loading model] %s\n", args.model_path.c_str());
     Model model = Model::load(args.model_path);
+
+    // Cap max_seq_len to save VRAM (KV cache scales linearly with this)
+    if (static_cast<int>(model.config.max_seq_len) > args.max_seq_len) {
+        fprintf(stderr, "[Config] Capping max_seq_len: %u → %d (saves %.0f MB VRAM)\n",
+                model.config.max_seq_len, args.max_seq_len,
+                (double)(model.config.max_seq_len - args.max_seq_len) *
+                model.config.n_layers * model.config.n_kv_heads *
+                model.config.head_dim * 2 * sizeof(half) / 1e6);
+        model.config.max_seq_len = args.max_seq_len;
+    }
 
     // Initialise tokenizer
     Tokenizer tokenizer;
