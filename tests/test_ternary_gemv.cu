@@ -179,6 +179,116 @@ bool run_test(int rows, int cols, int group_size) {
     return pass;
 }
 
+// =========================================================================
+// INT8 DP4A GEMV test
+// =========================================================================
+bool run_test_int8(int rows, int cols, int group_size) {
+    printf("Testing ternary_gemv_int8 (DP4A): rows=%d, cols=%d, group_size=%d\n",
+           rows, cols, group_size);
+
+    int masks_per_row = cols / 32;
+    int groups_per_row = cols / group_size;
+    size_t nz_size = (size_t)rows * masks_per_row;
+    size_t scales_size = (size_t)rows * groups_per_row;
+
+    // Host allocations
+    uint32_t* h_nz = (uint32_t*)malloc(nz_size * sizeof(uint32_t));
+    uint32_t* h_sg = (uint32_t*)malloc(nz_size * sizeof(uint32_t));
+    half* h_scales = (half*)malloc(scales_size * sizeof(half));
+    float* h_scales_f = (float*)malloc(scales_size * sizeof(float));
+    half* h_input = (half*)malloc(cols * sizeof(half));
+    float* h_input_f = (float*)malloc(cols * sizeof(float));
+    half* h_output = (half*)malloc(rows * sizeof(half));
+    float* h_ref = (float*)malloc(rows * sizeof(float));
+
+    // Generate random data
+    for (size_t i = 0; i < nz_size; i++) h_nz[i] = rand_uint32();
+    for (size_t i = 0; i < nz_size; i++) h_sg[i] = rand_uint32();
+    for (size_t i = 0; i < scales_size; i++) {
+        float s = rand_float() * 0.1f;
+        h_scales_f[i] = s;
+        h_scales[i] = __float2half(s);
+    }
+    for (int i = 0; i < cols; i++) {
+        float v = rand_float();
+        h_input_f[i] = v;
+        h_input[i] = __float2half(v);
+    }
+
+    // CPU reference (same as before — uses float input)
+    cpu_reference(h_nz, h_sg, h_scales_f, h_input_f, h_ref, rows, cols, group_size);
+
+    // GPU allocations
+    uint32_t *d_nz, *d_sg;
+    half *d_scales, *d_input, *d_output;
+    int8_t* d_int8;
+    float*  d_scale_out;
+
+    CUDA_CHECK(cudaMalloc(&d_nz,        nz_size * sizeof(uint32_t)));
+    CUDA_CHECK(cudaMalloc(&d_sg,        nz_size * sizeof(uint32_t)));
+    CUDA_CHECK(cudaMalloc(&d_scales,    scales_size * sizeof(half)));
+    CUDA_CHECK(cudaMalloc(&d_input,     cols * sizeof(half)));
+    CUDA_CHECK(cudaMalloc(&d_output,    rows * sizeof(half)));
+    CUDA_CHECK(cudaMalloc(&d_int8,      cols * sizeof(int8_t)));
+    CUDA_CHECK(cudaMalloc(&d_scale_out, sizeof(float)));
+
+    CUDA_CHECK(cudaMemcpy(d_nz, h_nz, nz_size * sizeof(uint32_t), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_sg, h_sg, nz_size * sizeof(uint32_t), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_scales, h_scales, scales_size * sizeof(half), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_input, h_input, cols * sizeof(half), cudaMemcpyHostToDevice));
+
+    // Quantise input to INT8 on GPU
+    ternary::quantize_absmax_int8(d_input, d_int8, d_scale_out, cols);
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    float h_input_scale = 0.0f;
+    CUDA_CHECK(cudaMemcpy(&h_input_scale, d_scale_out, sizeof(float), cudaMemcpyDeviceToHost));
+
+    // Run INT8 kernel
+    ternary::ternary_gemv_int8(d_nz, d_sg, d_scales,
+                               d_int8, h_input_scale, d_output,
+                               rows, cols, group_size, 0);
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    // Copy back
+    CUDA_CHECK(cudaMemcpy(h_output, d_output, rows * sizeof(half), cudaMemcpyDeviceToHost));
+
+    // Compare — INT8 quantisation adds extra error, so tolerance is larger
+    float max_err = 0.0f;
+    float max_rel_err = 0.0f;
+    int worst_row = -1;
+    for (int r = 0; r < rows; r++) {
+        float gpu_val = __half2float(h_output[r]);
+        float ref_val = h_ref[r];
+        float err = fabsf(gpu_val - ref_val);
+        float rel = (fabsf(ref_val) > 1e-6f) ? err / fabsf(ref_val) : err;
+        if (err > max_err) { max_err = err; worst_row = r; }
+        max_rel_err = fmaxf(max_rel_err, rel);
+    }
+
+    // INT8 quantisation error is larger — use ~5% tolerance
+    float tolerance = 5e-2f;
+    bool pass = max_rel_err < tolerance || max_err < tolerance;
+
+    printf("  Input scale: %f\n", h_input_scale);
+    printf("  Max absolute error: %e (row %d)\n", max_err, worst_row);
+    printf("  Max relative error: %e\n", max_rel_err);
+    if (worst_row >= 0)
+        printf("  GPU[%d] = %f, Ref[%d] = %f\n",
+               worst_row, __half2float(h_output[worst_row]), worst_row, h_ref[worst_row]);
+    printf("  Result: %s\n\n", pass ? "PASS" : "FAIL");
+
+    // Cleanup
+    free(h_nz); free(h_sg); free(h_scales); free(h_scales_f);
+    free(h_input); free(h_input_f); free(h_output); free(h_ref);
+    CUDA_CHECK(cudaFree(d_nz)); CUDA_CHECK(cudaFree(d_sg));
+    CUDA_CHECK(cudaFree(d_scales)); CUDA_CHECK(cudaFree(d_input));
+    CUDA_CHECK(cudaFree(d_output)); CUDA_CHECK(cudaFree(d_int8));
+    CUDA_CHECK(cudaFree(d_scale_out));
+
+    return pass;
+}
+
 int main() {
     srand((unsigned int)time(nullptr));
 
@@ -186,34 +296,30 @@ int main() {
 
     int group_size = 128;
 
-    struct TestCase {
-        int rows, cols;
-    };
-
+    struct TestCase { int rows, cols; };
     TestCase tests[] = {
         {1024,  1024},
         {4096,  4096},
-        {4096, 11008},  // Note: 11008 is not divisible by 128 cleanly
-                        // 11008 / 128 = 86, so it works
+        {4096, 11008},
     };
-
-    // Verify 11008 is divisible by group_size and 32
-    if (11008 % group_size != 0 || 11008 % 32 != 0) {
-        // Adjust to nearest valid size
-        printf("Warning: 11008 not aligned, adjusting to 11008\n");
-        // 11008 = 86 * 128 = 344 * 32, so it's fine
-    }
 
     int total = sizeof(tests) / sizeof(tests[0]);
     int passed = 0;
 
+    // Legacy FP16 kernel tests
+    printf("--- Legacy FP16 kernel ---\n\n");
     for (int i = 0; i < total; i++) {
-        if (run_test(tests[i].rows, tests[i].cols, group_size)) {
-            passed++;
-        }
+        if (run_test(tests[i].rows, tests[i].cols, group_size)) passed++;
     }
 
-    printf("=== Summary: %d / %d tests passed ===\n", passed, total);
+    // INT8 DP4A kernel tests
+    printf("--- INT8 DP4A kernel ---\n\n");
+    for (int i = 0; i < total; i++) {
+        if (run_test_int8(tests[i].rows, tests[i].cols, group_size)) passed++;
+    }
 
-    return (passed == total) ? 0 : 1;
+    int total_tests = total * 2;
+    printf("=== Summary: %d / %d tests passed ===\n", passed, total_tests);
+
+    return (passed == total_tests) ? 0 : 1;
 }

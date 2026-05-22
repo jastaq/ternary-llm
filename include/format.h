@@ -32,8 +32,12 @@ struct TLLMHeader {
     uint32_t rope_theta_bits;        // float reinterpreted as uint32
     uint32_t group_size;
     uint32_t rms_norm_eps_bits;      // float reinterpreted as uint32
-    uint8_t  reserved[TLLM_HEADER_SIZE - 14 * sizeof(uint32_t)];
+    uint32_t flags;                  // bit 0: lm_head_ternary
+    uint8_t  reserved[TLLM_HEADER_SIZE - 15 * sizeof(uint32_t)];
 };
+
+// Flag bits
+constexpr uint32_t TLLM_FLAG_LM_HEAD_TERNARY = 1u << 0;
 
 static_assert(sizeof(TLLMHeader) == TLLM_HEADER_SIZE,
               "TLLMHeader must be exactly 256 bytes");

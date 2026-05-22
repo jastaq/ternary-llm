@@ -36,6 +36,9 @@ HEADER_SIZE = 256
 
 ARCH_LLAMA = 0
 
+# Flag bits
+FLAG_LM_HEAD_TERNARY = 1 << 0
+
 LINEAR_WEIGHT_NAMES = [
     "self_attn.q_proj.weight",
     "self_attn.k_proj.weight",
@@ -80,10 +83,11 @@ def write_header(
     rope_theta: float,
     group_size: int,
     rms_norm_eps: float,
+    flags: int = 0,
 ):
     """Write the 256-byte .tllm header."""
     header_fields = struct.pack(
-        "<" + "I" * 13,
+        "<" + "I" * 15,
         TLLM_MAGIC,
         TLLM_VERSION,
         ARCH_LLAMA,
@@ -97,9 +101,9 @@ def write_header(
         head_dim,
         _float_to_uint32_bits(rope_theta),
         group_size,
+        _float_to_uint32_bits(rms_norm_eps),
+        flags,
     )
-    # rms_norm_eps as float-bits uint32
-    header_fields += struct.pack("<I", _float_to_uint32_bits(rms_norm_eps))
 
     assert len(header_fields) <= HEADER_SIZE
     # Zero-pad to HEADER_SIZE
@@ -154,6 +158,7 @@ def convert(
     group_size: int = 128,
     threshold_factor: float = 0.7,
     device: str = "cuda",
+    ternarize_head: bool = False,
 ):
     print(f"[*] Loading model: {model_name}")
     model = AutoModelForCausalLM.from_pretrained(
@@ -195,6 +200,10 @@ def convert(
 
     with open(output_path, "wb") as fout:
         # ── 1. Header ──
+        flags = 0
+        if ternarize_head:
+            flags |= FLAG_LM_HEAD_TERNARY
+
         write_header(
             fout,
             vocab_size=vocab_size,
@@ -208,6 +217,7 @@ def convert(
             rope_theta=rope_theta,
             group_size=group_size,
             rms_norm_eps=rms_norm_eps,
+            flags=flags,
         )
         total_bytes += HEADER_SIZE
 
@@ -275,13 +285,30 @@ def convert(
         # ── 5. LM head ──
         # Handle tied embeddings: if lm_head.weight is missing, reuse embedding
         if "lm_head.weight" in state:
-            lm_head = state["lm_head.weight"].to(torch.float16).numpy()
+            lm_head_w = state["lm_head.weight"]
         else:
             print("[*] lm_head.weight not found – using tied embedding weights")
-            lm_head = state[embed_key].to(torch.float16).numpy()
-        print(f"[*] Writing lm_head: {lm_head.shape}")
-        total_bytes += _write_raw(fout, lm_head)
-        original_params += lm_head.size
+            lm_head_w = state[embed_key]
+
+        if ternarize_head:
+            print(f"[*] Ternarizing lm_head: {lm_head_w.shape}")
+            lm_head_padded = pad_to_multiple(lm_head_w.float(), multiple=32)
+            ternary, scales = ternarize_tensor(
+                lm_head_padded, group_size=group_size,
+                threshold_factor=threshold_factor,
+            )
+            ternary_2d = ternary.reshape(lm_head_padded.shape[0], lm_head_padded.shape[1])
+            nonzero_masks, sign_masks = pack_ternary_to_bitmasks(ternary_2d)
+            total_bytes += _write_raw(fout, nonzero_masks)
+            total_bytes += _write_raw(fout, sign_masks)
+            total_bytes += _write_raw(fout, scales.numpy())
+            nz = (ternary != 0).sum().item()
+            print(f"    lm_head sparsity: {1.0 - nz / ternary.numel():.1%}")
+        else:
+            lm_head = lm_head_w.to(torch.float16).numpy()
+            print(f"[*] Writing lm_head (fp16): {lm_head.shape}")
+            total_bytes += _write_raw(fout, lm_head)
+        original_params += lm_head_w.numel()
 
         # ── 6. Tokenizer ──
         print("[*] Writing tokenizer data")
@@ -339,6 +366,10 @@ def main():
         "--device", type=str, default="cuda",
         help="Torch device for model loading (default: cuda)",
     )
+    parser.add_argument(
+        "--ternarize-head", action="store_true", default=False,
+        help="Also ternarize lm_head (reduces size for large vocabs, but may hurt quality)",
+    )
     args = parser.parse_args()
 
     convert(
@@ -347,6 +378,7 @@ def main():
         group_size=args.group_size,
         threshold_factor=args.threshold_factor,
         device=args.device,
+        ternarize_head=args.ternarize_head,
     )
 
 

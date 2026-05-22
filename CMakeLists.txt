@@ -75,6 +75,7 @@ set_source_files_properties(
 add_executable(test_gemv
     tests/test_ternary_gemv.cu
     kernels/ternary_gemv.cu
+    kernels/activations.cu
 )
 target_include_directories(test_gemv PRIVATE ${CMAKE_SOURCE_DIR}/include)
 

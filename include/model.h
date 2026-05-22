@@ -63,7 +63,11 @@ struct Model {
     half*                      embedding_table  = nullptr;  // GPU [vocab_size, hidden_dim]
     std::vector<TransformerLayer> layers;
     half*                      final_norm_weight = nullptr; // GPU [hidden_dim]
-    half*                      lm_head_weight    = nullptr; // GPU [vocab_size, hidden_dim]
+
+    // lm_head can be FP16 or ternary (controlled by header flag)
+    bool                       lm_head_is_ternary = false;
+    half*                      lm_head_weight    = nullptr; // GPU [vocab, hidden] (FP16 path)
+    TernaryWeight              lm_head_ternary;             // (ternary path)
 
     // Raw tokenizer data extracted from .tllm file
     std::vector<uint8_t> tokenizer_data;

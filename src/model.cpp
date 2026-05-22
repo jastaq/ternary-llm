@@ -109,10 +109,13 @@ Model Model::load(const std::string& path) {
     c.group_size       = header.group_size;
     c.rms_norm_eps     = bits_to_float(header.rms_norm_eps_bits);
 
+    model.lm_head_is_ternary = (header.flags & TLLM_FLAG_LM_HEAD_TERNARY) != 0;
+
     fprintf(stderr, "[Model] %s: vocab=%u  hidden=%u  layers=%u  heads=%u/%u  "
-            "max_seq=%u  group=%u\n",
+            "max_seq=%u  group=%u  lm_head=%s\n",
             path.c_str(), c.vocab_size, c.hidden_dim, c.n_layers,
-            c.n_heads, c.n_kv_heads, c.max_seq_len, c.group_size);
+            c.n_heads, c.n_kv_heads, c.max_seq_len, c.group_size,
+            model.lm_head_is_ternary ? "ternary" : "fp16");
 
     // Precompute padded dimensions
     int hidden_pad       = pad32(c.hidden_dim);
@@ -164,10 +167,16 @@ Model Model::load(const std::string& path) {
     size_t norm_bytes = c.hidden_dim * sizeof(half);
     model.final_norm_weight = reinterpret_cast<half*>(read_to_gpu(f, norm_bytes));
 
-    // ---- lm_head (FP16, not ternarised) ----
-    size_t head_bytes = static_cast<size_t>(c.vocab_size) * c.hidden_dim * sizeof(half);
-    model.lm_head_weight = reinterpret_cast<half*>(read_to_gpu(f, head_bytes));
-    fprintf(stderr, "[Model]   lm_head: %.1f MB\n", head_bytes / 1e6);
+    // ---- lm_head ----
+    if (model.lm_head_is_ternary) {
+        model.lm_head_ternary = read_ternary_weight(f, c.vocab_size, hidden_pad, gs);
+        fprintf(stderr, "[Model]   lm_head (ternary): %.1f MB\n",
+                model.lm_head_ternary.total_bytes(gs) / 1e6);
+    } else {
+        size_t head_bytes = static_cast<size_t>(c.vocab_size) * c.hidden_dim * sizeof(half);
+        model.lm_head_weight = reinterpret_cast<half*>(read_to_gpu(f, head_bytes));
+        fprintf(stderr, "[Model]   lm_head (fp16): %.1f MB\n", head_bytes / 1e6);
+    }
 
     // ---- Tokenizer blob ----
     uint64_t tok_size = 0;
@@ -221,7 +230,11 @@ void Model::free_gpu() {
     }
     layers.clear();
     safe_free(final_norm_weight); final_norm_weight = nullptr;
-    safe_free(lm_head_weight);    lm_head_weight    = nullptr;
+    if (lm_head_is_ternary) {
+        free_ternary(lm_head_ternary);
+    } else {
+        safe_free(lm_head_weight); lm_head_weight = nullptr;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -246,7 +259,11 @@ size_t Model::gpu_memory_bytes() const {
 
     // Final norm + lm_head
     total += config.hidden_dim * sizeof(half);
-    total += static_cast<size_t>(config.vocab_size) * config.hidden_dim * sizeof(half);
+    if (lm_head_is_ternary) {
+        total += lm_head_ternary.total_bytes(gs);
+    } else {
+        total += static_cast<size_t>(config.vocab_size) * config.hidden_dim * sizeof(half);
+    }
 
     return total;
 }
