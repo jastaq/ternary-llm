@@ -124,8 +124,7 @@ def find_tokenizer_model(model_name_or_path: str) -> bytes:
         if sp_path.exists():
             return sp_path.read_bytes()
 
-    # 2. Try the HuggingFace cache
-    from transformers.utils import TRANSFORMERS_CACHE
+    # 2. Try downloading tokenizer.model from HuggingFace Hub
     try:
         from huggingface_hub import hf_hub_download
         sp_path = hf_hub_download(
@@ -141,6 +140,17 @@ def find_tokenizer_model(model_name_or_path: str) -> bytes:
         tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
         if hasattr(tokenizer, "sp_model"):
             return tokenizer.sp_model.serialized_model_proto()
+    except Exception:
+        pass
+
+    # 4. For non-SentencePiece tokenizers (tiktoken / BPE), save tokenizer.json
+    try:
+        from huggingface_hub import hf_hub_download
+        tok_path = hf_hub_download(
+            repo_id=model_name_or_path,
+            filename="tokenizer.json",
+        )
+        return Path(tok_path).read_bytes()
     except Exception:
         pass
 
