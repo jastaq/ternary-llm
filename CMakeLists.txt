@@ -65,7 +65,7 @@ target_link_libraries(ternary-llm PRIVATE sentencepiece-static)
 
 # Ensure .cpp files that include CUDA headers can be compiled
 set_source_files_properties(
-    src/transformer.cpp src/model.cpp src/sampler.cpp src/memory.cpp
+    src/main.cpp src/transformer.cpp src/model.cpp src/sampler.cpp src/memory.cpp
     PROPERTIES LANGUAGE CUDA
 )
 
