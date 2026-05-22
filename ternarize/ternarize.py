@@ -188,16 +188,26 @@ def convert(
     max_seq_len = getattr(config, "max_position_embeddings", 4096)
     rope_theta = float(getattr(config, "rope_theta", 10000.0))
     rms_norm_eps = float(getattr(config, "rms_norm_eps", 1e-5))
-    head_dim = hidden_dim // n_heads
 
-    # Get intermediate_dim from actual weight shape (configs can lie!)
+    # ── Detect actual dimensions from weight shapes (configs can lie!) ──
+    q_key = "model.layers.0.self_attn.q_proj.weight"
+    k_key = "model.layers.0.self_attn.k_proj.weight"
     gate_key = "model.layers.0.mlp.gate_proj.weight"
-    intermediate_dim_config = config.intermediate_size
-    intermediate_dim = state[gate_key].shape[0]  # actual out_features
-    if intermediate_dim != intermediate_dim_config:
-        print(f"    [!] Config says intermediate_size={intermediate_dim_config}, "
-              f"but actual gate_proj shape is {state[gate_key].shape}")
-        print(f"    [!] Using actual intermediate_dim={intermediate_dim}")
+
+    q_dim_actual = state[q_key].shape[0]
+    kv_dim_actual = state[k_key].shape[0]
+    intermediate_dim = state[gate_key].shape[0]
+    head_dim = q_dim_actual // n_heads
+
+    # Report any mismatches
+    head_dim_config = hidden_dim // n_heads
+    inter_config = config.intermediate_size
+    if head_dim != head_dim_config:
+        print(f"    [!] Config implies head_dim={head_dim_config} (hidden/heads), "
+              f"but actual q_proj shape {state[q_key].shape} → head_dim={head_dim}")
+    if intermediate_dim != inter_config:
+        print(f"    [!] Config says intermediate_size={inter_config}, "
+              f"but actual gate_proj shape {state[gate_key].shape} → intermediate_dim={intermediate_dim}")
 
     print(f"    vocab_size       = {vocab_size}")
     print(f"    hidden_dim       = {hidden_dim}")
@@ -207,6 +217,8 @@ def convert(
     print(f"    n_kv_heads       = {n_kv_heads}")
     print(f"    max_seq_len      = {max_seq_len}")
     print(f"    head_dim         = {head_dim}")
+    print(f"    q_dim            = {q_dim_actual}  (n_heads × head_dim)")
+    print(f"    kv_dim           = {kv_dim_actual}  (n_kv_heads × head_dim)")
     print(f"    rope_theta       = {rope_theta}")
     print(f"    rms_norm_eps     = {rms_norm_eps}")
     print(f"    group_size       = {group_size}")
