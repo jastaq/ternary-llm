@@ -55,7 +55,7 @@ void rope_forward(
 void attention_forward(
     const half* q, const half* k_cache, const half* v_cache,
     half* output, int batch, int n_heads, int n_kv_heads, int head_dim,
-    int seq_len, int kv_len, cudaStream_t stream = 0);
+    int seq_len, int kv_len, int kv_len_max, cudaStream_t stream = 0);
 
 void silu_mul_forward(
     const half* gate, const half* up, half* output, int size,

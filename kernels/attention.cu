@@ -305,11 +305,9 @@ void attention_forward(
     int head_dim,
     int seq_len,
     int kv_len,
+    int kv_len_max,
     cudaStream_t stream)
 {
-    // kv_len_max is inferred to be kv_len for cache sizing
-    // (the caller allocated max_seq_len; we pass kv_len as the actual filled positions)
-    int kv_len_max = kv_len;
 
     if (seq_len == 1) {
         // Decode path

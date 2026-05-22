@@ -240,7 +240,7 @@ half* Transformer::forward(const int* token_ids_gpu, int n_tokens,
             q_buf_, k_cache_layer, v_cache_layer,
             attn_out_buf_,
             1, n_heads, n_kv_heads, head_dim,
-            n_tokens, kv_len);
+            n_tokens, kv_len, max_seq);
 
         // 6. Output projection
         if (use_int8) {
