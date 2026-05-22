@@ -179,16 +179,28 @@ Model Model::load(const std::string& path) {
     }
 
     // ---- Tokenizer blob ----
+    long fpos = ftell(f);
+    fprintf(stderr, "[Model]   file position before tokenizer: %ld\n", fpos);
+
     uint64_t tok_size = 0;
     if (fread(&tok_size, sizeof(uint64_t), 1, f) == 1 && tok_size > 0) {
-        model.tokenizer_data.resize(tok_size);
-        size_t n = fread(model.tokenizer_data.data(), 1, tok_size, f);
-        if (n != tok_size) {
-            fprintf(stderr, "[Model] Warning: tokenizer short read %zu/%lu\n",
-                    n, static_cast<unsigned long>(tok_size));
-        }
-        fprintf(stderr, "[Model]   tokenizer: %lu bytes\n",
+        fprintf(stderr, "[Model]   tokenizer size: %lu bytes\n",
                 static_cast<unsigned long>(tok_size));
+
+        // Sanity check: tokenizer should not be > 100 MB
+        if (tok_size > 100 * 1024 * 1024ULL) {
+            fprintf(stderr, "[Model] WARNING: tokenizer size looks bogus (%lu), skipping\n",
+                    static_cast<unsigned long>(tok_size));
+        } else {
+            model.tokenizer_data.resize(tok_size);
+            size_t n = fread(model.tokenizer_data.data(), 1, tok_size, f);
+            if (n != tok_size) {
+                fprintf(stderr, "[Model] Warning: tokenizer short read %zu/%lu\n",
+                        n, static_cast<unsigned long>(tok_size));
+            }
+        }
+    } else {
+        fprintf(stderr, "[Model]   no tokenizer blob found\n");
     }
 
     fclose(f);
